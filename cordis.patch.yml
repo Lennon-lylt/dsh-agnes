@@ -1,0 +1,7 @@
+# dsh-agnes bundle layer.
+#
+# Pure additive wiring: it inserts the plugin row and touches no shipped row,
+# so removing this package (or the row) restores the deployment exactly.
+- insert:
+    - id: agnes
+      name: dsh-agnes

@@ -1,0 +1,13 @@
+# dependencies and local dev link
+node_modules/
+
+# smoke-test artifacts (written to the OS temp dir by default, kept out anyway)
+smoke-output/
+*.log
+
+# local backups made by the install/rollback procedure
+*.bak-agnes
+
+# OS noise
+Thumbs.db
+.DS_Store
