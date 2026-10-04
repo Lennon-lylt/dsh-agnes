@@ -37,5 +37,13 @@
     "image-generation",
     "video-generation"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lennon-lylt/dsh-agnes.git"
+  },
+  "homepage": "https://github.com/Lennon-lylt/dsh-agnes#readme",
+  "bugs": {
+    "url": "https://github.com/Lennon-lylt/dsh-agnes/issues"
+  },
   "license": "MIT"
 }
