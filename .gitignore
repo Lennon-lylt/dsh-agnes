@@ -8,6 +8,14 @@ smoke-output/
 # local backups made by the install/rollback procedure
 *.bak-agnes
 
+# editor/agent backups (*.bak-<timestamp>): kept on disk, never published
+*.bak-*
+
+# the plugin's own config store lives under <DSH_HOME>/storages/agnes/, but a
+# copy inside the checkout must never reach the repository either
+config.json
+storages/
+
 # OS noise
 Thumbs.db
 .DS_Store

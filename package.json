@@ -1,7 +1,7 @@
 {
   "name": "dsh-agnes",
-  "version": "0.1.0",
-  "description": "Agnes AI image/video generation for DeepSeek Harness: settings-backed config, agent-facing tools, background video tasks.",
+  "version": "0.6.1",
+  "description": "Agnes AI image/video generation for DeepSeek Harness (dsh 0.2.x line): settings-backed config, agent-facing tools, background video tasks.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -22,8 +22,14 @@
       "platform": "web"
     }
   },
-  "dependencies": {
+  "dependencies": {},
+  "peerDependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=20"
