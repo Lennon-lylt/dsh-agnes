@@ -33,20 +33,40 @@ Agnes AI 图像 / 视频生成能力，作为 DSH 插件：**给 agent 用的结
 
 产出**立即下载落盘**：Agnes 的输出 URL 会过期，URL 本身不作为交付物。落盘顺序：会话工作区 `agnes-output/<日期>/` → `<DSH_HOME>/agnes-output/<日期>/`（前者不可写时回退，并在结果里标注）。
 
-## 安装（当前：本地包）
+## 安装
+
+用 DSH 自己的安装器，**不要手工把包目录拷进 `profiles/<profile>/node_modules`**：
 
 ```powershell
-$src = 'D:\ai小说\agnes-test\dsh-agnes'
-$profile = "$env:DSH_HOME\profiles\web"
-Copy-Item -Recurse -Force $src "$profile\node_modules\dsh-agnes"
-# 把 "dsh-agnes" 追加到 $profile\package.json 的 dsh.profile.bundles
+dsh plugin --profile web add dsh-agnes                   # 发布到 npm 之后
+dsh plugin --profile web add file:D:\path\to\dsh-agnes   # 或直接从本地目录安装
 ```
 
-然后重启 DSH，使 profile 重新组合。设置 → **Agnes** 页填入 API Key（写入凭据存储，不回显）。
+装好后重启 DSH 让 profile 重新组合，然后打开 **设置 → Agnes** 填入 API Key（写入 DSH 凭据存储，不回显）。
 
-### 回滚
+### 为什么不能手工拷贝（实测教训）
+
+桌面端在启动时校验 profile 一致性。一个「存在于 `node_modules`、却没被 profile manifest 声明」的插件包会让整个插件树加载失败：
+
+```
+Harness could not start.
+Error: dsh: plugin tree failed to load: dsh: 3 entries did not activate
+```
+
+同一时刻 `logs/harness.log` 会给出真正的原因：
+
+```
+[desktop] profile inconsistency: dsh-agnes is installed but declared nowhere in the profile manifest
+```
+
+安装器的价值正在于此：它建立 `.generations/live/<pkg>+<version>+<hash>/` 布局，往 `profiles/<profile>/package.json` 写 `link:` 依赖，并登记 bundle。手工拷贝跳过了这些声明，代价是整个 harness 起不来。
+
+### 卸载 / 回滚
+
+用安装器对应的卸载命令，或市场 UI 卸载。手工安装的残留需要**目录与 manifest 声明一起清掉**，只处理一个仍会启动失败。
 
 ```powershell
+# 仅手工安装留下残局时使用
 Copy-Item "$env:DSH_HOME\profiles\web\package.json.bak-agnes" "$env:DSH_HOME\profiles\web\package.json" -Force
 Remove-Item -Recurse -Force "$env:DSH_HOME\profiles\web\node_modules\dsh-agnes"
 ```
