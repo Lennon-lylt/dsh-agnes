@@ -1,16 +1,21 @@
 {
   "name": "dsh-agnes",
   "version": "0.6.1",
-  "description": "Agnes AI image/video generation for DeepSeek Harness (dsh 0.2.x line): settings-backed config, agent-facing tools, background video tasks.",
+  "description": "Agnes AI image/video generation for DeepSeek Harness (dsh 0.2.x line): a settings page for configuration plus a bundled `agnes` skill whose CLI does the generation.",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "dsh-agnes": "./lib/cli.mjs"
+  },
   "exports": {
     ".": { "default": "./lib/index.js" },
     "./client": { "default": "./lib/client.js" },
+    "./cli": { "default": "./lib/cli.mjs" },
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "skills",
     "cordis.patch.yml",
     "README.md"
   ],

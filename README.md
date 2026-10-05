@@ -1,10 +1,12 @@
 # dsh-agnes
 
-Agnes AI 图像 / 视频生成能力，作为 DSH 插件：**给 agent 用的结构化工具 + 在 DSH 设置里可配置**。
+Agnes AI 图像 / 视频生成能力，作为 DSH 插件：**设置页负责配置，真正的调用走一个 bundled skill**。
 
-- Host 半边注册 4 个工具与 `agnes` 设置命名空间，视频任务后台轮询并落盘。
+- Host 半边注册 `agnes` 设置命名空间、**配置/凭据两条同源路由**，以及**一个 bundled skill**（`skills/agnes/SKILL.md`，其中的 `{{CLI}}` 会被替换成本机 CLI 的绝对路径）。**不注册任何模型工具**——能力在 skill 里，调用由 agent 用 shell 跑命令行完成。
 - Client 半边在 `settings.section` 注册一个设置页（API Key、模型、尺寸、输出目录、轮询参数）。
-- **配置存在插件自己的文件里**：`<DSH_HOME>/storages/agnes/config.json`（`{version, revision, values}`）。页面通过本插件宿主半边的同源路由读写它，工具同步读同一份文件；DSH 设置命名空间（导出 `Config` 派生出来的那份）只是**更低优先级的一层**。这样页面不依赖 DSH 设置平面的任何条件：客户端是否发布设置服务、宿主端 `describe()` 是否收录本行、命名空间能否派生——都不再影响可用性。
+- 执行体是 `lib/cli.mjs`：一个**纯 Node 进程**（无 Cordis、无 DSH ctx），读同一份设置文件 + Key 文件，复用 `lib/agnes-api.mjs`，产物按 `--out → 设置里的输出目录 → <当前目录>/agnes-output/<日期>/ → <DSH_HOME>/agnes-output/<日期>/` 落盘。
+- **配置存在插件自己的文件里**：`<DSH_HOME>/storages/agnes/config.json`（`{version, revision, values}`）。页面通过宿主半边的同源路由读写它，CLI 读同一份；DSH 设置命名空间（导出 `Config` 派生出来的那份）只是**更低优先级的一层**。
+- **API Key 有三处**：DSH 凭据存储（权威）、`<DSH_HOME>/storages/agnes/api-key`（宿主半在你保存时镜像一份，0600，供 CLI 读取）、环境变量 `AGNES_API_KEY`（优先级最高）。CLI 取用顺序就是：环境变量 → Key 文件。
 - 设置页按顺序探测传输：`ctx.remote.settings` → `settingsScope`（0.1.x）→ **宿主半边路由** `/api/dsh-agnes.settings`（配置）与 `/api/dsh-agnes.credential`（凭据）。前两条在 DSH 0.2.0-rc.2 的 Web 客户端对插件上下文恒为 undefined，所以实际走第三条。候选全失败时页面显示探测报告，并在控制台打 `[agnes] no settings transport`。
 - Host 半边仍按 0.2.x 文档声明「自带页面」：`configure({ auto: false }, ctx.fiber)`，挂在 `ctx.inject(['settings'], …)` 子级上 —— 没有 Settings 服务的宿主也能正常装载本行。
 - **路由必须挂在 `ctx.inject(['connection'], …)` 里**：`connection` 是**晚于 profile 行装载**的（dsh-context 源码里写明这条 load-order 约定），`ctx.get('connection')` 在 apply 时恒为 undefined——这正是「宿主路由没注册」那一轮的根因。等待不会阻塞本行，注册也随注入 fiber 一起撤销。
@@ -27,18 +29,25 @@ Agnes AI 图像 / 视频生成能力，作为 DSH 插件：**给 agent 用的结
 | `agnes-video-2.5` 对当前 key 无可用通道；`agnes-video-2.5-flash` 会 `video_queue_full` | `503 no available channel` |
 | 轮询 `GET /agnesapi?video_id=..&model_name=..` 返回 `status/progress/url/size_mapping/request_params` | 完成态含 `url` 指向 mp4 |
 
-这些事实直接决定了实现：视频工具拒绝本地文件当首帧（改为先经一次图生图换取公网 URL，并在结果里标注画面被改写过）。
+这些事实直接决定了实现：视频不接受本地文件当首帧（改为先经一次图生图换取公网 URL，并在结果里标注画面被改写过）。
 
-## 工具
+## 用法（skill + CLI）
 
-| 工具 | 作用 |
-| --- | --- |
-| `agnes_image` | 文生图 / 图生图（`images` 可传本地路径、data URI 或公网 URL） |
-| `agnes_video` | 文生视频，或首帧驱动；返回 `task id`，`wait_ms` 可同步等待一段 |
-| `agnes_task` | `list` / `status` / `wait` / `cancel` 跟踪视频任务（记录落盘，重启后仍可查） |
-| `agnes_models` | 列出当前 key 可达的模型（排查「无可用通道」用） |
+装了插件、在 **设置 → Agnes** 填好 API Key 之后，能力就已经挂到 skill 目录里了；agent 会在需要时读到它并执行：
 
-产出**立即下载落盘**：Agnes 的输出 URL 会过期，URL 本身不作为交付物。落盘顺序：会话工作区 `agnes-output/<日期>/` → `<DSH_HOME>/agnes-output/<日期>/`（前者不可写时回退，并在结果里标注）。
+```powershell
+node "<插件目录>\lib\cli.mjs" image --prompt "雨夜霓虹下的古镇，国风插画" --size 2K --aspect 16:9
+node "<插件目录>\lib\cli.mjs" image --prompt "改成线稿风格" --images .\photo.png
+node "<插件目录>\lib\cli.mjs" video --prompt "无人机掠过雪山" --size 720P --wait=180000
+node "<插件目录>\lib\cli.mjs" task list            # 或 status/wait/cancel --id <taskId>
+node "<插件目录>\lib\cli.mjs" models                # 当前 key 可达的模型
+node "<插件目录>\lib\cli.mjs" config                # 解析后的配置（不含密钥值）
+```
+
+- `skills/agnes/SKILL.md` 里的 `{{CLI}}` 在注册时被替换成**这个安装的绝对路径**，所以模型不需要猜路径。
+- **stdout 只有一个 JSON 对象**（过程信息走 stderr）：成功 `{ ok: true, files|task }`，失败 `{ ok: false, error, kind, hint }` 且退出码 1。
+- 落盘顺序：`--out` → 设置里的「输出目录」→ **`<当前工作目录>/agnes-output/<日期>/`**（agent 的 shell 就在会话工作区里，这一条就是「会话工作区」）→ `<DSH_HOME>/agnes-output/<日期>/`；回退时结果里 `fellBack: true`。
+- 产出**立即下载落盘**：Agnes 的输出 URL 会过期，URL 本身不作为交付物。
 
 ## 安装
 
@@ -135,6 +144,7 @@ cmd /c mklink /J dsh-agnes\node_modules "%APPDATA%\dsh-desktop\harness\profiles\
 - **边界在哪**：这两条路由挂在 `ctx.connection.fetch.register` 上，也就是所有官方插件 API 共用的**已认证、同源 `/api` 通道**（桌面端自带的 image-generation 路由同样如此）。**不要再加 Host/loopback 白名单**——实测教训：harness 构造 handler 的 Request 时用的 host 会被正则漏掉，于是**连设置页自己的请求都被 403**，页面只能退回一个看不到本行的设置平面。防护来自通道认证 + 字段校验 + revision + 原子写。
 - **手工编辑**：可以直接改文件；宿主半边按 mtime 自动重读，工具下一次调用即生效（`revision` 建议一并 +1，页面上陈旧写入会被 409 拒绝）。
 - **`revision`**：每次成功写入 +1；页面读到的 revision 会随写入回传，用于防止两个窗口互相覆盖。
+- **API Key 文件**：`<DSH_HOME>/storages/agnes/api-key`（单行、0600；Windows 下由数据目录的用户 ACL 兜底）。宿主半在你保存 Key 时写入，启动时若凭据已存在也会刷新一次。这是**给 CLI 的交接**——CLI 是独立进程，读不到 DSH 凭据存储。环境变量 `AGNES_API_KEY` 优先级高于该文件；不想留这份明文就删掉它并改用环境变量。
 
 ## 设置页排错（实测）
 

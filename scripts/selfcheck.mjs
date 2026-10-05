@@ -18,7 +18,7 @@
  *   cmd /c mklink /J dsh-agnes\node_modules "<DSH_HOME>\profiles\node_modules"
  */
 import path from 'node:path'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -33,6 +33,7 @@ const originalDshHome = process.env.DSH_HOME
 const scratchHome = await mkdtemp(path.join(tmpdir(), 'agnes-selfcheck-'))
 process.env.DSH_HOME = scratchHome
 const configFile = path.join(scratchHome, 'storages', 'agnes', 'config.json')
+const keyFile = path.join(scratchHome, 'storages', 'agnes', 'api-key')
 const defaultImageModel = 'agnes-image-2.5-flash'
 
 // ---------------------------------------------------------------- host half
@@ -53,6 +54,19 @@ function makeHostStub(kind) {
   const policies = []
   const routes = []
   const writes = []
+  const providers = []
+  const credentials = {
+    secrets: new Map(),
+    async describe(ref) {
+      return { ref, configured: this.secrets.has(ref) }
+    },
+    async resolve(ref) {
+      return this.secrets.get(ref)
+    },
+    async set(ref, value) {
+      this.secrets.set(ref, value)
+    },
+  }
   /** The route carrier a real host composes after this row applies. */
   const connection = {
     fetch: {
@@ -104,6 +118,18 @@ function makeHostStub(kind) {
         }
       }
       if (name === 'settings') return settings
+      // `credentials` is deliberately NOT resolvable here either: a real host
+      // composes it after the row applies, so the api-key mirror must ride the
+      // nested inject. Reverting to ctx.get() leaves the skill's CLI with no key.
+      // The skill registry: the plugin must publish exactly one bundled skill.
+      if (name === 'skills') {
+        return {
+          registerProvider(create) {
+            providers.push(create())
+            return () => {}
+          },
+        }
+      }
       // `connection` is deliberately NOT resolvable here: a real host composes it
       // AFTER the row applies, so the bridge must be registered through the
       // nested inject (see installSettingsBridge). Reverting to ctx.get() makes
@@ -129,6 +155,18 @@ function makeHostStub(kind) {
         })
         return
       }
+      if (services.indexOf('credentials') !== -1) {
+        callback({
+          get: (name) => (name === 'credentials' ? credentials : undefined),
+          credentials,
+          effect(callback2) {
+            const dispose = callback2()
+            effects.push(dispose)
+            return () => {}
+          },
+        })
+        return
+      }
       if (services.indexOf('settings') === -1) return
       callback({
         settings,
@@ -140,7 +178,7 @@ function makeHostStub(kind) {
       })
     },
   }
-  return { ctx, tools, effects, namespaces, policies, routes, writes }
+  return { ctx, tools, effects, namespaces, policies, routes, writes, providers, credentials }
 }
 
 // The exported Config schema is what a settings namespace is derived from, on
@@ -149,9 +187,19 @@ function makeHostStub(kind) {
 // policy but not the registration.
 const schemaAvailable = host.Config !== undefined
 
+const preseededKey = 'cpk-selfcheck-preseeded'
 for (const kind of ['modern', 'legacy']) {
   const stub = makeHostStub(kind)
+  if (kind === 'modern') stub.credentials.secrets.set('AGNES_API_KEY', preseededKey)
   await host.apply(stub.ctx)
+  if (kind === 'modern') {
+    // The mirror rides a nested inject, so it lands a task after apply returns.
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    if ((await readFile(keyFile, 'utf8')).trim() !== preseededKey) {
+      throw new Error('the api-key file was not mirrored from the credential store at apply time')
+    }
+    console.log('  key mirror    : refreshed from the credential store through the nested inject ok')
+  }
 
   console.log(`host half (${kind} settings host):`)
   console.log('  name          :', host.name)
@@ -162,18 +210,34 @@ for (const kind of ['modern', 'legacy']) {
       .map((entry) => `auto=${entry.presentation?.auto} owner=${entry.owner?.entry ?? '(none)'}`)
       .join(', ') || '(none)',
   )
-  console.log('  tools         :')
-  for (const tool of stub.tools) {
-    console.log(`    - ${tool.name} timeoutMs=${tool.timeoutMs} required=${JSON.stringify(tool.requiredArgs)}`)
-  }
+  console.log('  tools         :', stub.tools.length === 0 ? '(none — the capability lives in the skill)' : stub.tools.map((entry) => entry.name).join(', '))
+  console.log('  skill         :', stub.providers.length === 0 ? '(none)' : 'agnes (bundled SKILL.md)')
 
-  if (stub.tools.length !== 4) throw new Error(`expected 4 tools, got ${stub.tools.length}`)
+  // The capability is a skill, not model-facing tools: an accidental tool
+  // registration would both bloat every model call and double the surface.
+  if (stub.tools.length !== 0) throw new Error(`expected no tool registrations, got ${stub.tools.length}`)
   if (kind === 'modern') {
     const policy = stub.policies[0]
     if (policy === undefined) throw new Error('the 0.2.x settings page policy was not declared')
     if (policy.presentation?.auto !== false) throw new Error(`policy auto should be false, got ${JSON.stringify(policy.presentation)}`)
     if (policy.owner?.entry !== 'modern:agnes') {
       throw new Error(`the page policy must be owned by the row fiber, got ${JSON.stringify(policy.owner)}`)
+    }
+
+    // The bundled skill: one provider, whose candidate carries the CLI path
+    // substituted into the SKILL.md body (no {{CLI}} placeholder left behind).
+    if (stub.providers.length !== 1) throw new Error(`expected 1 skill provider, got ${stub.providers.length}`)
+    const provider = stub.providers[0]
+    const listed = await provider.list()
+    if (listed.length !== 1 || listed[0].name !== 'agnes') throw new Error(`unexpected skill list: ${JSON.stringify(listed.map((entry) => entry.name))}`)
+    const fetched = await provider.get({ name: 'agnes' })
+    if (fetched === undefined || typeof fetched.content !== 'string') throw new Error('the skill provider returned no content')
+    if (fetched.content.includes('{{CLI}}')) throw new Error('the {{CLI}} placeholder was not substituted')
+    if (!fetched.content.includes(path.join('lib', 'cli.mjs'))) throw new Error('the skill body must name the CLI path')
+    if (fetched.invocation?.modelInvocable !== true) throw new Error('the skill must be model-invocable')
+    const resourceBase = String(fetched.resourceBase?.path ?? '').replace(/[\\/]+$/u, '')
+    if (!resourceBase.endsWith(path.join('skills', 'agnes'))) {
+      throw new Error(`unexpected skill resourceBase: ${JSON.stringify(fetched.resourceBase)}`)
     }
     // The settings page's transport, end to end, against the same route object
     // the host carrier would invoke — and against this plugin's own config file.
@@ -235,6 +299,25 @@ for (const kind of ['modern', 'legacy']) {
     const otherHost = await settingsRoute.fetch(new Request('https://elsewhere.example/api/dsh-agnes.settings', { method: 'GET' }))
     if (!otherHost.ok) throw new Error(`the route must not depend on the Host header: ${otherHost.status}`)
     console.log('  route check   : file read + set/unset + conflict + validation + no Host filter ok')
+
+    // The credential route, and the handoff the skill's CLI depends on: saving a
+    // key must mirror it into the plugin's own 0600 api-key file.
+    const credentialRoute = stub.routes.find((route) => route.path.endsWith('.credential'))
+    if (credentialRoute === undefined) throw new Error('the credential route was not registered')
+    const savedKey = 'cpk-selfcheck-not-a-real-key'
+    const save = await credentialRoute.fetch(
+      new Request('http://127.0.0.1/api/dsh-agnes.credential', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ref: 'AGNES_API_KEY', value: savedKey }),
+      }),
+    )
+    if (!save.ok) throw new Error(`the credential route rejected the write: ${save.status}`)
+    if ((await readFile(keyFile, 'utf8')).trim() !== savedKey) throw new Error('the api-key file was not mirrored')
+    const readBack = await credentialRoute.fetch(new Request('http://127.0.0.1/api/dsh-agnes.credential?ref=AGNES_API_KEY', { method: 'GET' }))
+    const credentialView = await readBack.json()
+    if (credentialView.configured !== true) throw new Error(`the credential route does not report the saved key: ${JSON.stringify(credentialView)}`)
+    console.log('  credential    : stored via the route and mirrored to <DSH_HOME>/storages/agnes/api-key ok')
   } else if (!schemaAvailable) {
     console.log('  note: schemastery is unavailable here, so register() cannot be exercised in this checkout')
   } else if (stub.namespaces.length !== 1 || stub.namespaces[0].ns !== 'agnes') {
@@ -351,6 +434,67 @@ for (const optional of ['settingsScope', 'remote', 'remote.settings']) {
 // The client apply must tolerate a missing slots service instead of throwing.
 await clientExports.apply({ get: () => undefined })
 console.log('  apply with no slots: tolerated')
+
+// ------------------------------------------------- CLI (the skill's executable)
+// The whole point of the skill split: a plain Node process, no Cordis and no DSH
+// context, must be able to read the settings + key file and land an artifact in
+// the directory it runs in (the session workspace for an agent shell).
+const cli = await load('lib/cli.mjs')
+const runCwd = path.join(scratchHome, 'session-workspace')
+await mkdir(runCwd, { recursive: true })
+
+const calls = []
+const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+const fakeFetch = async (url, init = {}) => {
+  calls.push({ url: String(url), method: init.method ?? 'GET', auth: init.headers?.Authorization })
+  if (String(url).includes('/v1/images/generations')) {
+    return new Response(JSON.stringify({ data: [{ url: 'https://cdn.example/img.png', b64_json: '' }], created: 1, task_id: 't1' }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  if (String(url).includes('/v1/models')) {
+    return new Response(JSON.stringify({ data: [{ id: 'agnes-image-2.5-flash' }, { id: 'agnes-video-v2.0' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  if (String(url).includes('cdn.example')) return new Response(pngBytes, { status: 200 })
+  return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } })
+}
+
+const cliOptions = { env: { ...process.env, DSH_HOME: scratchHome }, cwd: runCwd, fetchImpl: fakeFetch }
+const imageRun = await cli.run(['image', '--prompt', 'a red circle', '--size', '2K'], cliOptions)
+if (imageRun.exitCode !== 0 || imageRun.payload.ok !== true) {
+  throw new Error(`CLI image failed: ${JSON.stringify(imageRun.payload)}`)
+}
+const landed = imageRun.payload.files?.[0]
+const expectedDir = path.join(runCwd, 'agnes-output', new Date().toISOString().slice(0, 10))
+if (!String(landed).startsWith(expectedDir)) throw new Error(`the CLI must land in the session workspace: ${landed}`)
+if (!(await readFile(landed)).equals(pngBytes)) throw new Error('the landed bytes do not match the download')
+if (imageRun.payload.keySource !== `file:${keyFile}`) throw new Error(`the CLI did not read the mirrored key file: ${imageRun.payload.keySource}`)
+if (calls[0]?.auth !== 'Bearer cpk-selfcheck-not-a-real-key') throw new Error('the CLI did not authenticate with the mirrored key')
+if (imageRun.payload.requestedSize !== '2K') throw new Error('the CLI ignored the --size flag')
+console.log('\nCLI (skill body):')
+console.log('  image         :', `landed ${path.relative(scratchHome, landed)} (${imageRun.payload.bytes} bytes, key from file)`)
+
+const modelsRun = await cli.run(['models'], cliOptions)
+if (modelsRun.payload.models?.length !== 2) throw new Error(`CLI models failed: ${JSON.stringify(modelsRun.payload)}`)
+const configRun = await cli.run(['config'], cliOptions)
+if (configRun.payload.keyConfigured !== true || configRun.payload.values?.imageModel !== defaultImageModel) {
+  throw new Error(`CLI config failed: ${JSON.stringify(configRun.payload)}`)
+}
+const noKeyRun = await cli.run(['image', '--prompt', 'x'], { ...cliOptions, env: { DSH_HOME: path.join(scratchHome, 'empty-home') } })
+if (noKeyRun.payload.ok !== false || noKeyRun.payload.kind !== 'auth') {
+  throw new Error(`a missing key must fail as auth: ${JSON.stringify(noKeyRun.payload)}`)
+}
+const helpRun = await cli.run(['help'], cliOptions)
+if (typeof helpRun.payload.usage !== 'string' || !helpRun.payload.usage.includes('image --prompt')) {
+  throw new Error('the CLI help text is missing')
+}
+console.log('  models/config :', 'ok')
+console.log('  missing key   :', 'reported as { ok: false, kind: "auth" }')
+console.log('  help          :', 'ok')
 
 // Leave the machine as it was found: the scratch home was this check's only
 // footprint.
